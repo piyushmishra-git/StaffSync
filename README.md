@@ -35,7 +35,8 @@ server/   Express 4 REST API - layered: routes → middleware → controllers �
           ├─ rbac('admin') / rbac('admin', 'manager') on every privileged route
           ├─ direct-report team scoping enforced in services, not just the UI
           ├─ field-level whitelists in services (employee vs admin profile edits)
-          └─ storage abstraction: disk driver (dev) / S3 driver (STORAGE_DRIVER=s3)
+          ├─ storage abstraction: disk driver (dev) / S3 driver (STORAGE_DRIVER=s3)
+          └─ serves client/dist when built, so one origin hosts the SPA and /api
 ```
 
 Key invariants:
@@ -90,7 +91,7 @@ The server verifies the SMTP connection at boot and logs the result; if a send f
 cd server && npm test
 ```
 
-94 integration tests (Jest + Supertest + in-memory MongoDB) covering the auth flow, password reset/change, public-signup role escalation, manager team scoping, admin employee lifecycle, leave entitlements and weekend/holiday-aware day counts, announcements/training/holidays, report filters and CSV exports, an RBAC 403/401 matrix over every privileged endpoint, attendance check-in atomicity, the leave→attendance sync loop, payroll write-denial, account deletion (cascade, self-delete block), and Mongo operator-injection sanitisation.
+**99 integration tests** (Jest + Supertest + in-memory MongoDB) covering the auth flow, password reset/change, public-signup role escalation, manager team scoping, admin employee lifecycle, leave entitlements and weekend/holiday-aware day counts, announcements/training/holidays, report filters and CSV exports, an RBAC 403/401 matrix over every privileged endpoint, attendance check-in atomicity, the leave→attendance sync loop, payroll write-denial, account deletion (cascade, self-delete block), Mongo operator-injection sanitisation, and production first-admin bootstrap.
 
 ## Security
 
@@ -104,8 +105,51 @@ cd server && npm test
 - Admins cannot delete their own account or remove their own admin role, so at least one admin always remains
 - Central error handler; stack traces suppressed in production
 
-## Deployment notes
+## Deployment
 
-- **API**: Render/Railway/EC2. Set `NODE_ENV=production`, real `MONGO_URI` (Atlas), strong `JWT_*` secrets, `CLIENT_ORIGIN`, SMTP credentials, and `STORAGE_DRIVER=s3` + `S3_BUCKET`/`S3_REGION` (credentials via standard AWS env/role).
-- **Client**: `npm run build` → deploy `client/dist` to Vercel/Netlify; route `/api/*` and `/uploads/*` to the API origin.
-- Future scaling (not needed at current size): Redis cache for dashboard aggregates, BullMQ for email fan-out, MongoDB read replicas.
+The recommended free setup is **one Render web service plus MongoDB Atlas M0**. Express serves both the API and the built React app (`client/dist`), so the browser only talks to one origin. That matters for auth: the refresh cookie is `HttpOnly; Secure; SameSite=Strict` scoped to `/api/auth`, which requires first-party cookies and HTTPS. Hosting the SPA separately on Vercel/Netlify would need cross-site cookie/CORS changes and is not supported out of the box.
+
+### 1. Database — MongoDB Atlas
+
+1. Create a free M0 cluster and a database user.
+2. Allow network access from `0.0.0.0/0` (or Render's egress addresses).
+3. Copy the `mongodb+srv://…/staffsync?retryWrites=true&w=majority` connection string.
+
+### 2. Web service — Render
+
+The repository includes [`render.yaml`](render.yaml). Either create a Blueprint from the repo, or a Web Service with:
+
+| Setting | Value |
+|---|---|
+| Root directory | `server` |
+| Build command | `npm ci --omit=dev && cd ../client && npm ci --include=dev && npm run build` |
+| Start command | `npm start` |
+| Health check path | `/api/health` |
+| Plan | Free |
+
+### 3. Environment variables
+
+| Variable | Value |
+|---|---|
+| `NODE_ENV` | `production` |
+| `USE_MEMORY_DB` | `false` |
+| `MONGO_URI` | Atlas connection string |
+| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Two different long random strings |
+| `CLIENT_ORIGIN` | Public service URL, e.g. `https://staffsync.onrender.com` |
+| `BOOTSTRAP_ADMIN_EMAIL` | First admin's email |
+| `BOOTSTRAP_ADMIN_PASSWORD` | First admin's password (8+ chars, upper, lower, digit) |
+| `BOOTSTRAP_ADMIN_EMPLOYEE_ID` | Optional, defaults to `ADM001` |
+
+Demo accounts are **not** seeded in production. On the first production boot the server creates one verified, active admin from `BOOTSTRAP_ADMIN_*` and stops doing so as soon as any admin exists. If no admin exists and the variables are missing, startup fails with a clear message instead of running without an administrator. After signing in, change the bootstrap password on the Security page and create real employees from Admin → Directory. You can then remove `BOOTSTRAP_ADMIN_PASSWORD`; it is only read while no admin exists.
+
+The browser sends all API requests to `/api` on the same host (Express), so no frontend `VITE_API_URL` is needed. In local development Vite proxies `/api` and `/uploads` to `http://localhost:5000`.
+
+### Free-tier caveats
+
+- The free Render service sleeps after 15 minutes idle; the next request can take ~30–60 s.
+- The 23:55 UTC absentee cron only runs while the process is awake, so a slept service can miss it. Trigger the manual sweep from Admin → Attendance after a busy day, or use a paid instance for reliable scheduling.
+- Render's disk is ephemeral: uploaded profile pictures/documents disappear on redeploy. Set `STORAGE_DRIVER=s3` with AWS credentials for durable storage (the S3 driver targets AWS S3; it does not support R2/B2 endpoints without code changes).
+- Without SMTP configured, verification and password-reset links are only written to the server log, so self-service reset and public sign-up verification are unusable for real users. Configure `SMTP_*` (for Gmail: an app password) before enabling them.
+- `CLIENT_ORIGIN` must be the HTTPS public URL. Cookies are marked `Secure`, so plain HTTP origins will not keep a session.
+
+Future scaling (not needed at current size): Redis cache for dashboard aggregates, BullMQ for email fan-out, MongoDB read replicas.

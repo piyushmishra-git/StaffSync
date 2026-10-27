@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -9,6 +10,10 @@ const sanitizeRequest = require('./middleware/sanitize');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
+
+// Render/Heroku/Railway terminate TLS at their proxy; trust exactly one hop so
+// req.ip (rate limiting) reflects the real client instead of the proxy.
+if (env.isProd) app.set('trust proxy', 1);
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({ origin: env.clientOrigin, credentials: true }));
@@ -44,6 +49,19 @@ app.use('/api/reports', require('./routes/report.routes'));
 
 // Locally stored uploads (disk storage driver)
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+
+// Single-service deployment: serve the built SPA from the API origin so the
+// browser talks to /api on the same host and the SameSite=Strict refresh
+// cookie stays first-party. Skipped automatically when the client is not built.
+const clientDist = path.join(__dirname, '..', '..', 'client', 'dist');
+const clientIndex = path.join(clientDist, 'index.html');
+if (fs.existsSync(clientIndex)) {
+  app.use(express.static(clientDist));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
+    res.sendFile(clientIndex);
+  });
+}
 
 app.use('/api', notFound);
 app.use(errorHandler);

@@ -71,7 +71,50 @@ async function seedUsers() {
   }
 }
 
-module.exports = { seedUsers };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
+
+// Production has no demo seed. Instead, the first boot creates one admin from
+// BOOTSTRAP_ADMIN_* env vars; later boots are a no-op while an admin exists.
+async function ensureBootstrapAdmin() {
+  if (await User.exists({ role: 'admin' })) return { created: false };
+
+  const email = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').trim().toLowerCase();
+  const password = process.env.BOOTSTRAP_ADMIN_PASSWORD || '';
+  const employeeId = (process.env.BOOTSTRAP_ADMIN_EMPLOYEE_ID || 'ADM001').trim().toUpperCase();
+
+  if (!email || !password) {
+    throw new Error(
+      'No admin account exists. Set BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD to create the first admin.'
+    );
+  }
+  if (!EMAIL_RE.test(email)) {
+    throw new Error('BOOTSTRAP_ADMIN_EMAIL is not a valid email address.');
+  }
+  if (!PASSWORD_RE.test(password)) {
+    throw new Error(
+      'BOOTSTRAP_ADMIN_PASSWORD must be at least 8 characters and contain a lowercase letter, an uppercase letter and a number.'
+    );
+  }
+
+  const conflict = await User.findOne({ $or: [{ email }, { employeeId }] });
+  if (conflict) {
+    throw new Error(
+      `Cannot create the bootstrap admin: ${conflict.employeeId} / ${conflict.email} already exists with role "${conflict.role}" and no admin account exists. Promote it manually or choose different BOOTSTRAP_ADMIN_* values.`
+    );
+  }
+
+  const user = new User({ employeeId, email, role: 'admin' });
+  await user.setPassword(password);
+  user.isEmailVerified = true;
+  user.isActive = true;
+  await user.save();
+  await Profile.create({ user: user._id });
+  console.log(`[bootstrap] Created first admin: ${email} (${employeeId})`);
+  return { created: true, user };
+}
+
+module.exports = { seedUsers, ensureBootstrapAdmin };
 
 if (require.main === module) {
   const { connectDb, disconnectDb } = require('./config/db');

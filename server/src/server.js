@@ -4,7 +4,9 @@ const app = require('./app');
 
 async function main() {
   await connectDb();
-  if (!env.isProd) {
+  if (env.isProd) {
+    await require('./seed').ensureBootstrapAdmin();
+  } else {
     const { seedUsers } = require('./seed');
     await seedUsers();
   }
