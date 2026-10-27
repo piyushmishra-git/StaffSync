@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+:root {
+  --brand-navy: #142D4E;
+  --brand-blue: #2563EB;
+  --brand-blue-hover: #1D4ED8;
+  --brand-blue-light: #EFF6FF;
+  --brand-blue-ring: #BFDBFE;
+}
+
+body {
+  @apply bg-slate-100 text-slate-900 antialiased;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
